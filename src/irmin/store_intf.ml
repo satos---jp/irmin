@@ -872,7 +872,7 @@ module type S = sig
   val save_tree :
     ?clear:bool ->
     repo ->
-    [> write ] Private.Contents.t ->
+    [> read_write ] Private.Contents.t ->
     [> read_write ] Private.Node.t ->
     tree ->
     hash Lwt.t

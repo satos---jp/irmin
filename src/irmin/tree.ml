@@ -60,6 +60,7 @@ module Make (P : Private.S) = struct
     mutable contents_hash : int;
     mutable contents_find : int;
     mutable contents_add : int;
+    mutable contents_mem : int;
     mutable node_hash : int;
     mutable node_mem : int;
     mutable node_add : int;
@@ -77,6 +78,7 @@ module Make (P : Private.S) = struct
       contents_hash = 0;
       contents_add = 0;
       contents_find = 0;
+      contents_mem = 0;
       node_hash = 0;
       node_mem = 0;
       node_add = 0;
@@ -90,6 +92,7 @@ module Make (P : Private.S) = struct
     t.contents_hash <- 0;
     t.contents_add <- 0;
     t.contents_find <- 0;
+    t.contents_mem <- 0;
     t.node_hash <- 0;
     t.node_mem <- 0;
     t.node_add <- 0;
@@ -500,26 +503,17 @@ module Make (P : Private.S) = struct
       if StepMap.is_empty map then (
         t.info.value <- Some P.Node.Val.empty;
         k P.Node.Val.empty)
-      else
-        let rec aux acc seq =
-          match seq () with
-          | Seq.Nil ->
-              cnt.node_val_v <- cnt.node_val_v + 1;
-              let v = P.Node.Val.of_seq acc in
-              t.info.value <- Some v;
-              k v
-          | Seq.Cons ((step, v), rest) -> (
-              match v with
-              | `Contents (c, m) ->
-                  let v = `Contents (Contents.hash c, m) in
-                  let acc = Seq.cons (step, v) acc in
-                  aux acc rest
-              | `Node n ->
-                  hash n (fun h ->
-                      let acc = Seq.cons (step, `Node h) acc in
-                      aux acc rest))
+      else (
+        cnt.node_val_v <- cnt.node_val_v + 1;
+        let v =
+          StepMap.to_seq map
+          |> Seq.map (function
+               | step, `Contents (c, m) -> (step, `Contents (Contents.hash c, m))
+               | step, `Node n -> (step, hash n (fun h -> `Node h)))
+          |> P.Node.Val.of_seq
         in
-        aux Seq.empty (StepMap.to_seq map)
+        t.info.value <- Some v;
+        k v)
 
     and value_of_elt : type r. elt -> (P.Node.Val.value, r) cont =
      fun e k ->
@@ -760,6 +754,28 @@ module Make (P : Private.S) = struct
               to_map t >>= function
               | Error _ as e -> Lwt.return e
               | Ok m -> ok (seq_of_map ?offset ?length m)))
+
+    let seq_of_updates repo v updates =
+      let seq0 =
+        StepMap.to_seq updates
+        |> Seq.filter_map (function
+             | step, Add v -> Some (step, v)
+             | _, Remove -> None)
+      in
+      let seq1 =
+        P.Node.Val.seq v
+        |> Seq.filter (fun (step, _) -> not (StepMap.mem step updates))
+        |> Seq.map (fun (step, x) ->
+               let h = match x with `Node h -> h | `Contents (h, _) -> h in
+               let x = `Node (of_hash repo h) in
+               (step, x))
+      in
+      Seq.append seq0 seq1
+
+    let seq_unordered t : (step * elt) Seq.t or_error Lwt.t =
+      match t.v with
+      | Value (repo, v, Some updates) -> ok (seq_of_updates repo v updates)
+      | _ -> seq t
 
     let bindings t =
       to_map t >|= function
@@ -1264,116 +1280,70 @@ module Make (P : Private.S) = struct
     | `Node k -> `Node (Node.of_hash repo k)
     | `Contents (k, m) -> `Contents (Contents.of_hash repo k, m)
 
-  let value_of_map t map = Node.value_of_map t map (fun x -> x)
-
   let export ?clear repo contents_t node_t n =
-    let seen = Hashes.create 127 in
-    let add_node n v () =
-      cnt.node_add <- cnt.node_add + 1;
-      let+ k = P.Node.add node_t v in
-      let k' = Node.hash n in
-      assert (equal_hash k k');
-      Node.export ?clear repo n k
+    let rec on_node (`Node n) k =
+      match n.Node.v with
+      | Node.Hash (_, h) ->
+          (* Not modified *)
+          Node.export ?clear repo n h;
+          k ()
+      | Node.Value (_, v, None) ->
+          (* Not modified *)
+          let h = P.Node.Key.hash v in
+          Node.export ?clear repo n h;
+          k ()
+      | _ ->
+          let* children_seq =
+            let+ seq = Node.seq_unordered n in
+            Seq.map (fun (_, x) -> x) (get_ok "export" seq)
+          in
+          on_node_seq children_seq @@ fun () ->
+          let* v = Node.to_value n in
+          let v = get_ok "export" v in
+          let key = Node.hash n in
+          cnt.node_mem <- cnt.node_mem + 1;
+          let* mem = P.Node.mem node_t key in
+          let* () =
+            if mem then Lwt.return_unit
+            else (
+              cnt.node_add <- cnt.node_add + 1;
+              let+ key' = P.Node.add node_t v in
+              assert (equal_hash key key'))
+          in
+          Node.export ?clear repo n key;
+          k ()
+    and on_contents (`Contents (c, _)) k =
+      match c.Contents.v with
+      | Contents.Hash (_, key) ->
+          Contents.export ?clear repo c key;
+          k ()
+      | Contents.Value _ ->
+          let* v = Contents.to_value c in
+          let v = get_ok "export" v in
+          let key = Contents.hash c in
+          cnt.contents_mem <- cnt.contents_mem + 1;
+          let* mem = P.Contents.mem contents_t key in
+          let* () =
+            if mem then Lwt.return_unit
+            else (
+              cnt.contents_add <- cnt.contents_add + 1;
+              let+ key' = P.Contents.add contents_t v in
+              assert (equal_hash key key'))
+          in
+          Contents.export ?clear repo c key;
+          k ()
+    and on_node_seq seq k =
+      match seq () with
+      | Seq.Nil ->
+          (* Have iterated on all children, let's export parent now *)
+          k ()
+      | Seq.Cons ((`Node _ as n), rest) ->
+          on_node n (fun () -> on_node_seq rest k)
+      | Seq.Cons ((`Contents _ as c), rest) ->
+          on_contents c (fun () -> on_node_seq rest k)
     in
-    let add_contents c x () =
-      cnt.contents_add <- cnt.contents_add + 1;
-      let+ k = P.Contents.add contents_t x in
-      let k' = Contents.hash c in
-      assert (equal_hash k k');
-      Contents.export ?clear repo c k
-    in
-    let add_node_map n x () = add_node n (value_of_map n x) () in
-    let todo = Stack.create () in
-    let rec add_to_todo : type a. _ -> (unit -> a Lwt.t) -> a Lwt.t =
-     fun n k ->
-      let h = Node.hash n in
-      if Hashes.mem seen h then k ()
-      else (
-        Hashes.add seen h ();
-        match n.Node.v with
-        | Node.Hash _ ->
-            Node.export ?clear repo n h;
-            k ()
-        | Node.Value (_, x, None) ->
-            Stack.push (add_node n x) todo;
-            k ()
-        | Map _ | Value (_, _, Some _) -> (
-            cnt.node_mem <- cnt.node_mem + 1;
-            P.Node.mem node_t h >>= function
-            | true ->
-                Node.export ?clear repo n h;
-                k ()
-            | false -> (
-                match n.v with
-                | Hash _ | Value (_, _, None) ->
-                    (* might happen if the node has already been added
-                       (while the thread was block on P.Node.mem *)
-                    k ()
-                | Map children ->
-                    let l = StepMap.bindings children |> List.map snd in
-                    add_steps_to_todo l n k
-                | Value (_, _, Some children) ->
-                    let l =
-                      StepMap.bindings children
-                      |> List.filter_map (function
-                           | _, Node.Remove -> None
-                           | _, Node.Add v -> Some v)
-                    in
-                    add_steps_to_todo l n k)))
-    and add_steps_to_todo : type a. _ -> _ -> (unit -> a Lwt.t) -> a Lwt.t =
-     fun l n k ->
-      (* 1. convert partial values to total values *)
-      let* () =
-        match n.Node.v with
-        | Value (_, _, Some _) ->
-            let+ v = Node.to_value n >|= get_ok "export" in
-            n.v <- Value (repo, v, None)
-        | _ -> Lwt.return_unit
-      in
-      (* 2. push the current node job on the stack. *)
-      let () =
-        match (n.v, Node.cached_value n) with
-        | _, Some v -> Stack.push (add_node n v) todo
-        | Map x, None -> Stack.push (add_node_map n x) todo
-        | _ -> assert false
-      in
-      let contents = ref [] in
-      let nodes = ref [] in
-      List.iter
-        (function
-          | `Contents c -> contents := c :: !contents
-          | `Node n -> nodes := n :: !nodes)
-        l;
-
-      (* 2. push the contents job on the stack. *)
-      List.iter
-        (fun (c, _) ->
-          let h = Contents.hash c in
-          if Hashes.mem seen h then ()
-          else (
-            Hashes.add seen h ();
-            match c.Contents.v with
-            | Contents.Hash _ -> ()
-            | Contents.Value x -> Stack.push (add_contents c x) todo))
-        !contents;
-
-      (* 3. push the children jobs on the stack. *)
-      List.iter
-        (fun n ->
-          Stack.push (fun () -> (add_to_todo [@tailcall]) n Lwt.return) todo)
-        !nodes;
-      k ()
-    in
-
-    let rec loop () =
-      let task = try Some (Stack.pop todo) with Stack.Empty -> None in
-      match task with None -> Lwt.return_unit | Some t -> t () >>= loop
-    in
-    (add_to_todo [@tailcall]) n (fun () ->
-        loop () >|= fun () ->
-        let x = Node.hash n in
-        Log.debug (fun l -> l "Tree.export -> %a" pp_hash x);
-        x)
+    let+ () = on_node (`Node n) (fun () -> Lwt.return_unit) in
+    Node.hash n
 
   let merge : t Merge.t =
     let f ~old (x : t) y =

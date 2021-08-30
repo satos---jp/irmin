@@ -402,56 +402,63 @@ struct
 
     let stable t = t.stable
 
-    type acc = { cursor : int; values : (step * value) Seq.t; remaining : int }
+    type acc = { mutable acc_offset : int; mutable acc_length : int }
 
-    let empty_acc n = { cursor = 0; values = Seq.empty; remaining = n }
+    let rec seq_tree layout acc bucket_seq k () =
+      match bucket_seq () with
+      | Seq.Nil -> k ()
+      | Seq.Cons (None, rest) -> seq_tree layout acc rest k ()
+      | Seq.Cons (Some i, rest) ->
+          let trg = Ptr.target layout i in
+          let length = length trg in
+          if acc.acc_offset - length >= 0 then (
+            (* This branch is optional, it just acts as a shortcut.
+               [seq_values] could handle the pagination by itself. *)
+            acc.acc_offset <- acc.acc_offset - length;
+            seq_tree layout acc rest k ())
+          else seq_v layout acc trg.v (seq_tree layout acc rest k) ()
 
-    let rec seq_entry layout ~offset ~length acc = function
-      | None -> acc
-      | Some i -> seq_values layout ~offset ~length acc (Ptr.target layout i).v
+    and seq_values layout acc value_seq k () =
+      match value_seq () with
+      | Seq.Nil -> k ()
+      | Cons (x, rest) ->
+          if acc.acc_offset = 0 then (
+            acc.acc_length <- acc.acc_length - 1;
+            if acc.acc_length = 0 then Seq.Cons (x, Seq.empty)
+            else Seq.Cons (x, seq_values layout acc rest k))
+          else (
+            acc.acc_offset <- acc.acc_offset - 1;
+            seq_values layout acc rest k ())
 
-    and seq_tree layout ~offset ~length acc t =
-      if acc.remaining <= 0 || offset + length <= acc.cursor then acc
-      else if acc.cursor + t.length < offset then
-        { acc with cursor = t.length + acc.cursor }
-      else Array.fold_left (seq_entry layout ~offset ~length) acc t.entries
+    and seq_v layout acc v k () =
+      match v with
+      | Tree t -> seq_tree layout acc (Array.to_seq t.entries) k ()
+      | Values vs -> seq_values layout acc (StepMap.to_seq vs) k ()
 
-    and seq_values layout ~offset ~length acc v =
-      if acc.remaining <= 0 || offset + length <= acc.cursor then acc
-      else
-        match v with
-        | Values vs ->
-            let len = StepMap.cardinal vs in
-            if acc.cursor + len < offset then
-              { acc with cursor = len + acc.cursor }
-            else
-              let to_drop =
-                if acc.cursor > offset then 0 else offset - acc.cursor
-              in
-              let vs =
-                StepMap.to_seq vs |> Seq.drop to_drop |> Seq.take acc.remaining
-              in
-              let n = Seq.length vs in
-              {
-                values = Seq.append acc.values vs;
-                cursor = acc.cursor + len;
-                remaining = acc.remaining - n;
-              }
-        | Tree t -> seq_tree layout ~offset ~length acc t
-
-    let seq_v layout ?(offset = 0) ?length v =
-      let length =
+    let seq layout ?(offset = 0) ?length t : (step * value) Seq.t =
+      if offset < 0 then invalid_arg "Invalid pagination offset";
+      let acc_length =
         match length with
         | Some n -> n
         | None -> (
-            match v with
+            match t.v with
             | Values vs -> StepMap.cardinal vs - offset
             | Tree i -> i.length - offset)
       in
-      let entries = seq_values layout ~offset ~length (empty_acc length) v in
-      entries.values
+      let acc = { acc_offset = offset; acc_length } in
+      seq_v layout acc t.v (fun () -> Seq.Nil)
 
-    let seq layout ?offset ?length t = seq_v layout ?offset ?length t.v
+    let seq_tree layout i : (step * value) Seq.t =
+      let acc_length = i.length in
+      let acc = { acc_offset = 0; acc_length } in
+      seq_v layout acc (Tree i) (fun () -> Seq.Nil)
+
+    let seq_v layout v : (step * value) Seq.t =
+      let acc_length =
+        match v with Values vs -> StepMap.cardinal vs | Tree i -> i.length
+      in
+      let acc = { acc_offset = 0; acc_length } in
+      seq_v layout acc v (fun () -> Seq.Nil)
 
     let to_bin_v layout = function
       | Values vs ->
@@ -798,10 +805,8 @@ struct
       | Tree t -> (
           let len = t.length - 1 in
           if len <= Conf.entries then
-            let vs =
-              seq_tree layout ~offset:0 ~length:t.length (empty_acc t.length) t
-            in
-            let vs = StepMap.of_seq vs.values in
+            let vs = seq_tree layout t in
+            let vs = StepMap.of_seq vs in
             let vs = StepMap.remove s vs in
             let t = values layout vs in
             k t

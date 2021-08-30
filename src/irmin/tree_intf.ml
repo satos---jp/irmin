@@ -283,6 +283,7 @@ module type S = sig
     mutable contents_hash : int;
     mutable contents_find : int;
     mutable contents_add : int;
+    mutable contents_mem : int;
     mutable node_hash : int;
     mutable node_mem : int;
     mutable node_add : int;
@@ -321,7 +322,7 @@ module type Sigs = sig
     val export :
       ?clear:bool ->
       P.Repo.t ->
-      [> write ] P.Contents.t ->
+      [> read_write ] P.Contents.t ->
       [> read_write ] P.Node.t ->
       node ->
       P.Node.key Lwt.t
