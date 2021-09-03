@@ -84,13 +84,4 @@ module Seq = struct
   let rec take n (l : 'a t) () =
     if n = 0 then Nil
     else match l () with Nil -> Nil | Cons (x, l') -> Cons (x, take (n - 1) l')
-
-  let nil () = Nil
-  let singleton x () = Cons (x, nil)
-  let length l = Seq.fold_left (fun acc _ -> acc + 1) 0 l
-
-  let rec snoc l1 x () =
-    match l1 () with
-    | Nil -> singleton x ()
-    | Cons (x, l1') -> Cons (x, snoc l1' x)
 end

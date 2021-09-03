@@ -161,7 +161,7 @@ module Make (P : Private.S) = struct
   module Contents = struct
     type v = Hash of repo * hash | Value of contents
     type info = { mutable hash : hash option; mutable value : contents option }
-    type t = { mutable v : v; mutable info : info }
+    type t = { mutable v : v; info : info }
 
     let info_is_empty i = i.hash = None && i.value = None
 
@@ -191,6 +191,7 @@ module Make (P : Private.S) = struct
       let hash = t.info.hash in
       if c then clear t;
       match (t.v, hash) with
+      | (Hash (repo', _) as v), _ when repo == repo' -> t.v <- v
       | Hash (_, k), _ -> t.v <- Hash (repo, k)
       | Value _, None -> t.v <- Hash (repo, k)
       | Value _, Some k -> t.v <- Hash (repo, k)
@@ -312,7 +313,7 @@ module Make (P : Private.S) = struct
       | Hash of repo * hash
       | Value of repo * value * updatemap option
 
-    and t = { mutable v : v; mutable info : info }
+    and t = { mutable v : v; info : info }
     (** [t.v] has 3 possible states:
 
         - A [Map], only after a [Tree.of_concrete] operation.
@@ -426,8 +427,13 @@ module Make (P : Private.S) = struct
     (* export t to the given repo and clear the cache *)
     let export ?clear:(c = true) repo t k =
       let hash = t.info.hash in
-      if c then clear t;
+      if c then (
+        t.info.value <- None;
+        t.info.map <- None;
+        t.info.hash <- None;
+        t.info.findv_cache <- None);
       match t.v with
+      | Hash (repo', _) as v when repo' == repo -> t.v <- v
       | Hash (_, k) -> t.v <- Hash (repo, k)
       | Value (_, v, None) when P.Node.Val.is_empty v -> ()
       | Map m when StepMap.is_empty m -> ()
@@ -778,6 +784,7 @@ module Make (P : Private.S) = struct
       | _ -> seq t
 
     let bindings t =
+      (* XXX: If [t] is value, no need to [to_map] *)
       to_map t >|= function
       | Error _ as e -> e
       | Ok m -> Ok (StepMap.bindings m)
@@ -813,13 +820,16 @@ module Make (P : Private.S) = struct
         let next acc =
           match force with
           | `True | `And_clear ->
+              (* XXX: Let's not call [to_map] when [Value] *)
               let* m = to_map t >|= get_ok "fold" in
               if force = `And_clear then clear ~depth:0 t;
               (map [@tailcall]) ~path acc d (Some m) k
           | `False skip -> (
               match cached_map t with
               | Some n -> (map [@tailcall]) ~path acc d (Some n) k
-              | None -> skip path acc >>= k)
+              | None ->
+                  (* XXX: That node is skipped if is is of tag Value *)
+                  skip path acc >>= k)
         in
         match depth with
         | None -> apply acc >>= next

@@ -727,8 +727,6 @@ struct
       let hash = lazy (Bin.V.hash (to_bin_v layout v)) in
       { hash; stable = false; v }
 
-    let of_values layout l = values layout (StepMap.of_seq l)
-
     let is_empty t =
       match t.v with Values vs -> StepMap.is_empty vs | Tree _ -> false
 
@@ -834,12 +832,9 @@ struct
       | Some _ -> remove layout ~depth:0 t s Fun.id |> stabilize layout
 
     let of_seq l =
-      let len = Seq.length l in
       let t =
-        if len <= Conf.entries then of_values Total l
-        else
-          let aux acc (s, v) = add Total ~copy:false acc s v in
-          Seq.fold_left aux (empty Total) l
+        let aux acc (s, v) = add Total ~copy:false acc s v in
+        Seq.fold_left aux (empty Total) l
       in
       stabilize Total t
 
