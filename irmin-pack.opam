@@ -37,3 +37,4 @@ pin-depends: [
 ]
 
 synopsis: "Irmin backend which stores values in a pack file"
+version: "2.7.2"

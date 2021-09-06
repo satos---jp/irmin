@@ -34,3 +34,4 @@ depends: [
 
 
 synopsis: "GraphQL server for Irmin"
+version: "2.7.2"

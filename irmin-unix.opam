@@ -55,3 +55,4 @@ description: """
 as a very simple CLI tool (called `irmin`) to manipulate and inspect Irmin
 stores.
 """
+version: "2.7.2"

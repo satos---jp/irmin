@@ -18,3 +18,4 @@ depends: [
 ]
 
 synopsis: "PPX deriver for Irmin type representations"
+version: "2.7.2"

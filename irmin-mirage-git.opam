@@ -29,3 +29,4 @@ depends: [
 ]
 
 synopsis: "MirageOS-compatible Irmin stores"
+version: "2.7.2"

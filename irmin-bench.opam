@@ -43,3 +43,4 @@ description: """
 `irmin-bench` provides access to the Irmin suite for benchmarking storage backend
 implementations.
 """
+version: "2.7.2"

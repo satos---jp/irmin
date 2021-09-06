@@ -35,3 +35,4 @@ depends: [
 ]
 
 synopsis: "HTTP client and server for Irmin"
+version: "2.7.2"

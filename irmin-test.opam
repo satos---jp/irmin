@@ -36,3 +36,4 @@ description: """
 `irmin-test` provides access to the Irmin test suite for testing storage backend
 implementations.
 """
+version: "2.7.2"
